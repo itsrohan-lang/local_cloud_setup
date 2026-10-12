@@ -23,9 +23,12 @@ services:
     volumes:
       - "localstack_data:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"
+      # Auto-init script hook:
+      - "./init-scripts:/etc/localstack/init/ready.d"
+      # Local disk backup folder:
+      - "./s3-backup:/s3-backup"
     networks:
       - de-network
-
   # ---------------------------------------------
   # 2. EC2 EQUIVALENT (Compute Node for Ingestion/Dev)
   # ---------------------------------------------
