@@ -1,0 +1,216 @@
+networks:
+  de-network:
+    driver: bridge
+
+volumes:
+  localstack_data:
+  postgres_data:
+
+services:
+  # ---------------------------------------------
+  # 1. AWS S3 (LocalStack)
+  # ---------------------------------------------
+  localstack:
+    image: localstack/localstack:3.8.1
+    container_name: localstack
+    hostname: localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,dynamodb,lambda
+      - AWS_DEFAULT_REGION=us-east-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "localstack_data:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    networks:
+      - de-network
+
+  # ---------------------------------------------
+  # 2. EC2 EQUIVALENT (Compute Node for Ingestion/Dev)
+  # ---------------------------------------------
+  ec2-compute:
+    image: python:3.11-slim
+    container_name: de_ec2_node
+    volumes:
+      - ./scripts:/app/scripts
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - S3_ENDPOINT_URL=http://localstack:4566
+    command: >
+      bash -c "pip install boto3 requests pandas && tail -f /dev/null"
+    networks:
+      - de-network
+
+  # ---------------------------------------------
+  # 3. EMR EQUIVALENT: OFFICIAL APACHE SPARK
+  # ---------------------------------------------
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: de_emr_master
+    hostname: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    volumes:
+      - ./scripts:/opt/spark/scripts
+    ports:
+      - "9090:8080" # Spark Web UI
+      - "7077:7077" # Spark Master Port
+    networks:
+      - de-network
+
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: de_emr_worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    volumes:
+      - ./scripts:/opt/spark/scripts
+    networks:
+      - de-network
+
+  # ---------------------------------------------
+  # 4. ORCHESTRATION (Apache Airflow)
+  # ---------------------------------------------
+  airflow-postgres:
+    image: postgres:15-alpine
+    container_name: de_postgres
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - de-network
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: de_airflow_init
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@de.local \
+          --password admin
+    networks:
+      - de-network
+
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: de_airflow_orchestrator
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      spark-master:
+        condition: service_started
+      localstack:
+        condition: service_started
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    command: standalone
+    networks:
+      - de-network
+
+  # ---------------------------------------------
+  # 5. JUPYTER NOTEBOOKS (EMR Studio Equivalent)
+  # ---------------------------------------------
+  jupyter:
+    image: quay.io/jupyter/pyspark-notebook:latest
+    container_name: de_jupyter_notebook
+    ports:
+      - "8888:8888" # JupyterLab UI
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    command: start-notebook.py --NotebookApp.token='' --NotebookApp.password=''
+    networks:
+      - de-network
+
+  # ---------------------------------------------
+  # 6. DYNAMODB ADMIN UI (Visual browser dashboard)
+  # ---------------------------------------------
+  dynamodb-admin:
+    image: aaronshaf/dynamodb-admin
+    container_name: de_dynamodb_admin
+    profiles: ["extra"]
+    ports:
+      - "8001:8001"
+    environment:
+      - DYNAMO_ENDPOINT=http://localstack:4566
+      - AWS_REGION=us-east-1
+    depends_on:
+      - localstack
+    networks:
+      - de-network
+
+  # ---------------------------------------------
+  # 7. STEP FUNCTIONS (Official AWS Local Image)
+  # ---------------------------------------------
+  stepfunctions-local:
+    image: amazon/aws-stepfunctions-local:latest
+    container_name: de_stepfunctions
+    profiles: ["extra"]
+    ports:
+      - "8083:8083"
+    environment:
+      - LAMBDA_ENDPOINT=http://localstack:4566
+      - AWS_DEFAULT_REGION=us-east-1
+    depends_on:
+      - localstack
+    networks:
+      - de-network
+
+  # ---------------------------------------------
+  # 8. ELASTICSEARCH (Single-node local cluster)
+  # ---------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.24
+    container_name: de_elasticsearch
+    profiles: ["extra"]
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    networks:
+      - de-network

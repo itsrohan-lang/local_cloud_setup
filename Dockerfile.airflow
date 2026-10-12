@@ -1,0 +1,14 @@
+FROM apache/airflow:2.9.0
+
+USER root
+
+# Install Docker CLI so Airflow can trigger tasks in other containers
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends docker.io && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Add airflow user to the docker group so it can access the docker socket
+RUN usermod -aG root airflow
+
+USER airflow

@@ -1,0 +1,11 @@
+{
+  "Comment": "Data pipeline state machine",
+  "StartAt": "CheckS3",
+  "States": {
+    "CheckS3": {
+      "Type": "Pass",
+      "Result": "Bronze data ready for Spark",
+      "End": true
+    }
+  }
+}
